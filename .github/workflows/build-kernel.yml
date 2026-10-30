@@ -27,7 +27,7 @@ jobs:
       
       - name: Apply USB-Arsenal Kernel Patches (4.14)
         run: |
-          git clone --depth=1 https://github.com/ravindu644/USB-Arsenal.git /tmp/
+          git clone --depth=1 https://github.com/ravindu644/USB-Arsenal.git /tmp/USB-Arsenal/
           git am /tmp/USB-Arsenal/kernel-patches/4.14/*.patch
 
           
