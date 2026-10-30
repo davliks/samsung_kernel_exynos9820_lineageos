@@ -24,7 +24,13 @@ jobs:
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y bc build-essential libelf-dev libssl-dev bison flex python3 python-is-python3 rsync zip unzip curl
+      
+      - name: Apply USB-Arsenal Kernel Patches (4.14)
+        run: |
+          git clone --depth=1 https://github.com/ravindu644/USB-Arsenal.git /tmp/
+          git am /tmp/USB-Arsenal/kernel-patches/4.14/*.patch
 
+          
       - name: Cache Toolchain
         id: cache-toolchain
         uses: actions/cache@v4
