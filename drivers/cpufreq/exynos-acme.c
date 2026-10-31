@@ -1321,14 +1321,18 @@ static __init int init_domain(struct exynos_cpufreq_domain *domain,
 	domain->max_freq = cal_dfs_get_max_freq(domain->cal_id);
 	domain->min_freq = cal_dfs_get_min_freq(domain->cal_id);
 
-	/*
-	 * If max-freq property exists in device tree, max frequency is
-	 * selected to smaller one between the value defined in device
-	 * tree and CAL. In case of min-freq, min frequency is selected
-	 * to bigger one.
-	 */
-	if (!of_property_read_u32(dn, "max-freq", &val))
-		domain->max_freq = min(domain->max_freq, val);
+	/* Игнорируем заниженный лимит max-freq из DTB и ставим потолок таблицы CAL/ECT */
+	if (domain->id == 0) {
+		/* Little cluster (cpu0-cpu3): до 2002 МГц */
+		domain->max_freq = max(domain->max_freq, (unsigned int)2002000);
+	} else if (domain->id == 1) {
+		/* Mid cluster (cpu4-cpu5): до 2600/2704 МГц */
+		domain->max_freq = max(domain->max_freq, (unsigned int)2600000);
+	} else if (domain->id == 2) {
+		/* Big cluster M4 (cpu6-cpu7): до 3016 МГц */
+		domain->max_freq = max(domain->max_freq, (unsigned int)3016000);
+	}
+
 	if (!of_property_read_u32(dn, "min-freq", &val))
 		domain->min_freq = max(domain->min_freq, val);
 
