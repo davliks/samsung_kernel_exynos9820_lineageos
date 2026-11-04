@@ -102,7 +102,7 @@ pack_kernel(){
     cp "${SCRIPT_DIR}/dist/Image" "${SCRIPT_DIR}/tools/AnyKernel3"
 
     cd "${SCRIPT_DIR}/tools/AnyKernel3" && \
-    zip -r -9 "${SCRIPT_DIR}/dist/Droidspaces-KSUN-${MODEL}-${KERNEL_VERSION}-${BUILD_VERSION}.zip" .
+    zip -r -9 "${SCRIPT_DIR}/dist/Droidspaces-BakaSU-${MODEL}-${KERNEL_VERSION}-${BUILD_VERSION}.zip" .
 
     cd "${SCRIPT_DIR}"
 }
