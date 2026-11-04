@@ -13,7 +13,7 @@ KERNEL_VERSION="$(make kernelversion 2>/dev/null)"
 MODEL="${1:-beyondx}"
 
 # init & update git submodules
-git submodule update --init --recursive
+git submodule update --init --recursive --no-recommend-shallow
 
 # download & install clang-r563880c
 if [ ! -d "${HOME}/toolchains/clang-r563880c" ]; then
