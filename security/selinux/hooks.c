@@ -243,6 +243,11 @@ static inline u32 task_sid(const struct task_struct *task)
 	return sid;
 }
 
+static inline struct inode_security_struct *selinux_inode(
+						const struct inode *inode)
+{
+	return inode->i_security;
+}
 /* Allocate and free functions for each kind of security blob. */
 
 static int inode_alloc_security(struct inode *inode)
