@@ -2020,10 +2020,6 @@ static int __do_execve_file(int fd, struct filename *filename,
 	struct files_struct *displaced;
 	int retval;
 
-#ifdef CONFIG_KSU
-	extern int ksu_handle_execveat(int *, struct filename **, void *, void *, int *);
-	ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
-#endif
 	if (IS_ERR(filename))
 		return PTR_ERR(filename);
 
@@ -2198,7 +2194,11 @@ static int do_execveat_common(int fd, struct filename *filename,
 			      int flags)
 {
 
-
+#ifdef CONFIG_KSU
+	extern int ksu_handle_execveat(int *, struct filename **, void *, void *, int *);
+	ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+#endif
+	
 int do_execve_file(struct file *file, void *__argv, void *__envp)
 {
 	struct user_arg_ptr argv = { .ptr.native = __argv };
