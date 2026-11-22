@@ -10,6 +10,7 @@
 */
 
 #include <linux/of_gpio.h>
+#include <linux/slab.h>
 #include <linux/of.h>
 #include <linux/clk-provider.h>
 #include <linux/pm_runtime.h>
@@ -1048,6 +1049,15 @@ int decon_set_par(struct fb_info *info)
 	struct decon_window_regs win_regs;
 	int win_no = win->idx;
 
+	if (decon->dt.out_type == DECON_OUT_DP) {
+		info->fix.visual = fb_visual(var->bits_per_pixel, 0);
+		info->fix.line_length = fb_linelength(var->xres_virtual,
+				var->bits_per_pixel);
+		info->fix.xpanstep = fb_panstep(var->xres, var->xres_virtual);
+		info->fix.ypanstep = fb_panstep(var->yres, var->yres_virtual);
+		return 0;
+	}
+
 	if ((!IS_DECON_HIBER_STATE(decon) && IS_DECON_OFF_STATE(decon)) ||
 			decon->state == DECON_STATE_INIT)
 		return 0;
@@ -1212,6 +1222,192 @@ int decon_setcolreg(unsigned regno,
 }
 EXPORT_SYMBOL(decon_setcolreg);
 
+static int decon_dp_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
+{
+	struct decon_win *win = info->par;
+	struct decon_device *decon = win->decon;
+	struct decon_device *decon0;
+	struct v4l2_subdev *sd = NULL;
+	struct decon_win_config config;
+	struct decon_window_regs win_regs;
+	struct decon_mode_info psr;
+	struct dpp_config dpp_config;
+	struct decon_reg_data *regs;
+	unsigned long aclk_khz;
+	int win_no = decon->dt.dft_win;
+	int dpp_id = decon->dt.dft_ch;
+	int ret = 0;
+
+#if defined(CONFIG_EXYNOS_DISPLAYPORT)
+	if (!IS_DISPLAYPORT_HPD_PLUG_STATE()) {
+		decon_dbg("%s: decon%d DP HPD unplugged\n", __func__, decon->id);
+		return 0;
+	}
+#endif
+
+	if (IS_DECON_OFF_STATE(decon)) {
+		ret = decon_update_pwr_state(decon, DISP_PWR_NORMAL);
+		if (ret) {
+			decon_err("%s: failed to power on decon%d (%d)\n",
+					__func__, decon->id, ret);
+			return ret;
+		}
+	}
+
+	regs = kzalloc(sizeof(struct decon_reg_data), GFP_KERNEL);
+	if (!regs)
+		return -ENOMEM;
+
+	mutex_lock(&decon->lock);
+
+	if (!IS_DECON_ON_STATE(decon)) {
+		decon_warn("%s: decon%d not active (state:%d)\n",
+				__func__, decon->id, decon->state);
+		goto out_unlock;
+	}
+
+	/* Avoid IDMA channel collision if decon0 is active simultaneously */
+	decon0 = get_decon_drvdata(0);
+	if (decon0 && !IS_DECON_OFF_STATE(decon0) &&
+			test_bit(dpp_id, &decon0->cur_using_dpp)) {
+		int ch;
+
+		for (ch = decon->dt.dpp_cnt - 2; ch >= 0; ch--) {
+			if (!test_bit(ch, &decon0->cur_using_dpp)) {
+				dpp_id = ch;
+				break;
+			}
+		}
+	}
+
+	memset(&config, 0, sizeof(struct decon_win_config));
+	switch (var->bits_per_pixel) {
+	case 16:
+		config.format = DECON_PIXEL_FORMAT_RGB_565;
+		break;
+	case 24:
+	case 32:
+		/* Matches R@16 G@8 B@0 A@24 configured in decon_check_var */
+		config.format = DECON_PIXEL_FORMAT_ARGB_8888;
+		break;
+	default:
+		decon_err("%s: unsupported bpp %d\n", __func__, var->bits_per_pixel);
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+
+	config.state = DECON_WIN_STATE_BUFFER;
+	config.idma_type = dpp_id;
+	config.plane_alpha = 0xFF;
+	config.blending = DECON_BLENDING_NONE;
+	config.dpp_parm.addr[0] = info->fix.smem_start;
+
+	config.src.x = var->xoffset;
+	config.src.y = var->yoffset;
+	config.src.w = min_t(u32, var->xres, decon->lcd_info->xres);
+	config.src.h = min_t(u32, var->yres, decon->lcd_info->yres);
+	config.src.f_w = var->xres_virtual ? var->xres_virtual : config.src.w;
+	config.src.f_h = var->yres_virtual ? var->yres_virtual : config.src.h;
+
+	config.dst.x = 0;
+	config.dst.y = 0;
+	config.dst.w = config.src.w;
+	config.dst.h = config.src.h;
+	config.dst.f_w = decon->lcd_info->xres;
+	config.dst.f_h = decon->lcd_info->yres;
+
+#ifdef CONFIG_EXYNOS_MCD_HDR
+	config.wcg_mode = decon->color_mode;
+#endif
+
+	ret = decon_check_limitation(decon, win_no, &config);
+	if (ret < 0)
+		goto out_unlock;
+
+	decon_to_psr_info(decon, &psr);
+
+	if (decon_reg_wait_update_done_and_mask(decon->id, &psr,
+				SHADOW_UPDATE_TIMEOUT) > 0) {
+		decon_warn("%s: decon%d SHADOW_UPDATE_TIMEOUT\n", __func__, decon->id);
+		ret = -ETIMEDOUT;
+		goto out_unlock;
+	}
+
+	regs->num_of_window = 1;
+	memcpy(&regs->dpp_config[win_no], &config, sizeof(struct decon_win_config));
+	regs->dpp_config[win_no].format = dpu_translate_fmt_to_dpp(config.format);
+
+	decon->cur_using_dpp = 0;
+	set_bit(dpp_id, &decon->cur_using_dpp);
+	set_bit(dpp_id, &decon->prev_used_dpp);
+	win->dpp_id = dpp_id;
+
+#if defined(CONFIG_EXYNOS_BTS)
+	decon->bts.ops->bts_calc_bw(decon, regs);
+	decon->bts.ops->bts_update_bw(decon, regs, 0);
+#endif
+
+	memcpy(&info->var, var, sizeof(struct fb_var_screeninfo));
+	info->fix.visual = fb_visual(var->bits_per_pixel, 0);
+	info->fix.line_length = fb_linelength(config.src.f_w, var->bits_per_pixel);
+	info->fix.xpanstep = fb_panstep(var->xres, config.src.f_w);
+	info->fix.ypanstep = fb_panstep(var->yres, config.src.f_h);
+
+	memset(&dpp_config, 0, sizeof(struct dpp_config));
+	memcpy(&dpp_config.config, &regs->dpp_config[win_no],
+			sizeof(struct decon_win_config));
+	aclk_khz = v4l2_subdev_call(decon->out_sd[0], core, ioctl,
+			EXYNOS_DPU_GET_ACLK, NULL) / 1000U;
+	dpp_config.rcv_num = aclk_khz;
+#ifdef CONFIG_EXYNOS_MCD_HDR
+	dpp_config.wcg_mode = decon->color_mode;
+#endif
+
+	sd = decon->dpp_sd[dpp_id];
+	if (v4l2_subdev_call(sd, core, ioctl, DPP_WIN_CONFIG, &dpp_config)) {
+		decon_err("%s: failed to config DPP-%d for decon%d\n",
+				__func__, dpp_id, decon->id);
+		decon_reg_set_win_enable(decon->id, win_no, false);
+		clear_bit(dpp_id, &decon->cur_using_dpp);
+		set_bit(dpp_id, &decon->dpp_err_stat);
+		ret = -EIO;
+		goto out_bts;
+	}
+
+	memset(&win_regs, 0, sizeof(struct decon_window_regs));
+	win_regs.wincon = wincon(dpu_get_alpha_len(config.format), 0, 0,
+			config.plane_alpha, config.blending, win_no);
+	win_regs.start_pos = win_start_pos(config.dst.x, config.dst.y);
+	win_regs.end_pos = win_end_pos(config.dst.x, config.dst.y,
+			config.dst.w, config.dst.h);
+	win_regs.pixel_count = config.dst.w * config.dst.h;
+	win_regs.whole_w = config.dst.f_w;
+	win_regs.whole_h = config.dst.f_h;
+	win_regs.offset_x = config.dst.x;
+	win_regs.offset_y = config.dst.y;
+	win_regs.ch = dpp_id;
+	win_regs.plane_alpha = config.plane_alpha;
+	win_regs.format = config.format;
+	win_regs.blend = config.blending;
+
+	decon_reg_set_window_control(decon->id, win_no, &win_regs, false);
+	decon_reg_all_win_shadow_update_req(decon->id);
+	decon_reg_start(decon->id, &psr);
+
+	decon_wait_for_vsync(decon, VSYNC_TIMEOUT_MSEC);
+	if (decon_reg_wait_update_done_timeout(decon->id, SHADOW_UPDATE_TIMEOUT) < 0)
+		decon_err("%s: decon%d wait_for_update_timeout\n", __func__, decon->id);
+
+out_bts:
+#if defined(CONFIG_EXYNOS_BTS)
+	decon->bts.ops->bts_update_bw(decon, regs, 1);
+#endif
+out_unlock:
+	mutex_unlock(&decon->lock);
+	kfree(regs);
+	return ret;
+}
+
 int decon_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
 {
 	struct decon_win *win = info->par;
@@ -1224,6 +1420,9 @@ int decon_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
 	struct dpp_config dpp_config;
 	unsigned long aclk_khz;
 	struct decon_reg_data regs;
+
+	if (decon->dt.out_type == DECON_OUT_DP)
+		return decon_dp_pan_display(var, info);
 
 	if (decon->dt.out_type != DECON_OUT_DSI) {
 		decon_warn("%s: decon%d unspported on out_type(%d)\n",
@@ -1338,12 +1537,18 @@ int decon_mmap(struct fb_info *info, struct vm_area_struct *vma)
 {
 	int ret;
 	struct decon_win *win = info->par;
-	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+	struct dma_buf *dmabuf;
+
 #if defined(CONFIG_FB_TEST)
-	ret = dma_buf_mmap(win->fb_buf_data.dma_buf, vma, 0);
+	dmabuf = win->fb_buf_data.dma_buf;
 #else
-	ret = dma_buf_mmap(win->dma_buf_data[0].dma_buf, vma, 0);
+	dmabuf = win->dma_buf_data[0].dma_buf;
 #endif
+	if (!dmabuf)
+		return -ENOMEM;
+
+	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+	ret = dma_buf_mmap(dmabuf, vma, vma->vm_pgoff);
 
 	return ret;
 }
