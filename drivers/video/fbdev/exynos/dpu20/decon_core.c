@@ -3775,13 +3775,39 @@ static int decon_ioctl(struct fb_info *info, unsigned int cmd,
 static ssize_t decon_fb_read(struct fb_info *info, char __user *buf,
 		size_t count, loff_t *ppos)
 {
-	return 0;
+	unsigned long p = *ppos;
+	size_t total_size = info->fix.smem_len;
+
+	if (!info->screen_base || p >= total_size)
+		return 0;
+
+	if (count > total_size - p)
+		count = total_size - p;
+
+	if (copy_to_user(buf, (char __force *)info->screen_base + p, count))
+		return -EFAULT;
+
+	*ppos += count;
+	return count;
 }
 
 static ssize_t decon_fb_write(struct fb_info *info, const char __user *buf,
 		size_t count, loff_t *ppos)
 {
-	return 0;
+	unsigned long p = *ppos;
+	size_t total_size = info->fix.smem_len;
+
+	if (!info->screen_base || p >= total_size)
+		return -ENOSPC;
+
+	if (count > total_size - p)
+		count = total_size - p;
+
+	if (copy_from_user((char __force *)info->screen_base + p, buf, count))
+		return -EFAULT;
+
+	*ppos += count;
+	return count;
 }
 
 int decon_release(struct fb_info *info, int user)
@@ -3812,7 +3838,11 @@ int decon_release(struct fb_info *info, int user)
 
 	if (decon->dt.out_type == DECON_OUT_DP) {
 		/* Unused DECON state is DECON_STATE_INIT */
-		if (IS_DECON_ON_STATE(decon))
+		if (IS_DECON_ON_STATE(decon)
+#if defined(CONFIG_EXYNOS_DISPLAYPORT)
+			&& !IS_DISPLAYPORT_HPD_PLUG_STATE()
+#endif
+		)
 			decon_dp_disable(decon);
 	}
 
@@ -4047,6 +4077,13 @@ static int decon_fb_alloc_memory(struct decon_device *decon, struct decon_win *w
 	size = (real_size > virt_size) ? real_size : virt_size;
 	size *= DEFAULT_BPP / 8;
 
+	if (decon->dt.out_type == DECON_OUT_DP) {
+		unsigned int dp_min_size = 3840 * 2160 * 2 * (DEFAULT_BPP / 8);
+
+		if (size < dp_min_size)
+			size = dp_min_size;
+	}
+
 	fbi->fix.smem_len = size;
 	size = PAGE_ALIGN(size);
 
@@ -4083,12 +4120,14 @@ static int decon_fb_alloc_memory(struct decon_device *decon, struct decon_win *w
 	memset(vaddr, 0x00, size);
 
 	fbi->screen_base = vaddr;
+	fbi->screen_size = size;
 
+	if (decon->dt.out_type != DECON_OUT_DP) {
 #if !defined(CONFIG_SUPPORT_LEGACY_ION)
-	dma_buf_vunmap(buf, vaddr);
+		dma_buf_vunmap(buf, vaddr);
 #endif
-
-	fbi->screen_base = NULL;
+		fbi->screen_base = NULL;
+	}
 
 	win->dma_buf_data[1].fence = NULL;
 	win->dma_buf_data[2].fence = NULL;
@@ -4189,11 +4228,14 @@ static int decon_fb_test_alloc_memory(struct decon_device *decon, u32 size)
 	memset(vaddr, 0x00, size);
 
 	fbi->screen_base = vaddr;
+	fbi->screen_size = size;
 
+	if (decon->dt.out_type != DECON_OUT_DP) {
 #if !defined(CONFIG_SUPPORT_LEGACY_ION)
-	dma_buf_vunmap(buf, vaddr);
+		dma_buf_vunmap(buf, vaddr);
 #endif
-	fbi->screen_base = NULL;
+		fbi->screen_base = NULL;
+	}
 
 	if (decon->dt.out_type == DECON_OUT_DP) {
 		displayport = v4l2_get_subdevdata(decon->out_sd[0]);
@@ -4289,6 +4331,7 @@ static int decon_acquire_window(struct decon_device *decon, int idx)
 	}
 
 	fbinfo->fix.type	= FB_TYPE_PACKED_PIXELS;
+	fbinfo->fix.visual	= FB_VISUAL_TRUECOLOR;
 	fbinfo->fix.accel	= FB_ACCEL_NONE;
 	fbinfo->var.activate	= FB_ACTIVATE_NOW;
 	fbinfo->var.vmode	= FB_VMODE_NONINTERLACED;
