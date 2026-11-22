@@ -976,6 +976,86 @@ static void displayport_set_switch_state(struct displayport_device *displayport,
 #endif
 }
 
+static void displayport_fbdev_autostart(struct displayport_device *displayport)
+{
+	struct decon_device *decon = get_decon_drvdata(2);
+	struct fb_info *fbinfo;
+	videoformat video;
+	u32 w, h, need_size;
+	int i, ret;
+
+	if (!decon || !decon->win[decon->dt.dft_win]) {
+		displayport_err("%s: decon2 fbinfo is not ready\n", __func__);
+		return;
+	}
+
+	fbinfo = decon->win[decon->dt.dft_win]->fbinfo;
+	if (!fbinfo)
+		return;
+
+	if (forced_resolution >= 0 && forced_resolution < supported_videos_pre_cnt)
+		video = forced_resolution;
+	else
+		video = displayport->best_video;
+
+	w = supported_videos[video].dv_timings.bt.width;
+	h = supported_videos[video].dv_timings.bt.height;
+	need_size = w * h * 2 * (DEFAULT_BPP / 8);
+
+	if (need_size > fbinfo->fix.smem_len) {
+		for (i = supported_videos_pre_cnt - 1; i >= 0; i--) {
+			if (!supported_videos[i].edid_support_match)
+				continue;
+			w = supported_videos[i].dv_timings.bt.width;
+			h = supported_videos[i].dv_timings.bt.height;
+			if (w * h * 2 * (DEFAULT_BPP / 8) <= fbinfo->fix.smem_len) {
+				video = i;
+				break;
+			}
+		}
+	}
+
+	displayport->cur_video = video;
+	displayport->cur_timings = supported_videos[video].dv_timings;
+
+	displayport_info("%s: auto-enabling DP fbdev mode %s (%ux%u)\n",
+			__func__, supported_videos[video].name,
+			displayport->cur_timings.bt.width,
+			displayport->cur_timings.bt.height);
+
+	decon_displayport_get_out_sd(decon);
+
+	if (!lock_fb_info(fbinfo)) {
+		displayport_err("%s: failed to lock fbinfo\n", __func__);
+		return;
+	}
+
+	fbinfo->var.xres = decon->lcd_info->xres;
+	fbinfo->var.yres = decon->lcd_info->yres;
+	fbinfo->var.xres_virtual = decon->lcd_info->xres;
+	fbinfo->var.yres_virtual = decon->lcd_info->yres * 2;
+	fbinfo->var.xoffset = 0;
+	fbinfo->var.yoffset = 0;
+	fbinfo->var.left_margin = decon->lcd_info->hbp;
+	fbinfo->var.right_margin = decon->lcd_info->hfp;
+	fbinfo->var.upper_margin = decon->lcd_info->vbp;
+	fbinfo->var.lower_margin = decon->lcd_info->vfp;
+	fbinfo->var.hsync_len = decon->lcd_info->hsa;
+	fbinfo->var.vsync_len = decon->lcd_info->vsa;
+	fbinfo->var.bits_per_pixel = DEFAULT_BPP;
+	decon_check_var(&fbinfo->var, fbinfo);
+	fbinfo->fix.visual = FB_VISUAL_TRUECOLOR;
+	fbinfo->fix.line_length = fbinfo->var.xres * fbinfo->var.bits_per_pixel / 8;
+
+	ret = decon_update_pwr_state(decon, DISP_PWR_NORMAL);
+	if (!ret)
+		decon_pan_display(&fbinfo->var, fbinfo);
+	else
+		displayport_err("%s: decon2 enable failed (%d)\n", __func__, ret);
+
+	unlock_fb_info(fbinfo);
+}
+
 void displayport_hpd_changed(int state)
 {
 	int ret;
@@ -1047,12 +1127,14 @@ void displayport_hpd_changed(int state)
 		if (displayport->bist_used == 0) {
 			displayport_set_switch_state(displayport, 1);
 			timeout = wait_event_interruptible_timeout(displayport->dp_wait,
-				(displayport->state == DISPLAYPORT_STATE_ON), msecs_to_jiffies(3000));
+				(displayport->state == DISPLAYPORT_STATE_ON), msecs_to_jiffies(1000));
 #if defined(CONFIG_SND_SOC_SAMSUNG_DISPLAYPORT)
 			dp_ado_switch_set_state(edid_audio_informs());
 #endif
-			if (!timeout)
-				displayport_err("enable timeout\n");
+			if (!timeout) {
+				displayport_info("no Android HWC response, starting native fbdev DP\n");
+				displayport_fbdev_autostart(displayport);
+			}
 		} else
 			displayport_enable(displayport);
 	} else {
@@ -1089,18 +1171,17 @@ void displayport_hpd_changed(int state)
 #endif
 			displayport_set_switch_state(displayport, 0);
 			timeout = wait_event_interruptible_timeout(displayport->dp_wait,
-				(displayport->state == DISPLAYPORT_STATE_OFF), msecs_to_jiffies(7000));
+				(displayport->state == DISPLAYPORT_STATE_OFF), msecs_to_jiffies(1500));
 			if (!timeout) {
 				struct decon_device *decon = get_decon_drvdata(2);
 
-				displayport_err("disable timeout\n");
+				displayport_info("no Android HWC disable, stopping native fbdev DP\n");
 				if (displayport->state == DISPLAYPORT_STATE_INIT) {
 					displayport_info("not enabled\n");
 					goto HPD_FAIL;
-				} else if (decon->state == DECON_STATE_OFF &&
-						displayport->state == DISPLAYPORT_STATE_ON) {
-					displayport_err("abnormal state: decon:%d, displayport:%d\n",
-							decon->state, displayport->state);
+				} else if (decon && !IS_DECON_OFF_STATE(decon)) {
+					decon_update_pwr_state(decon, DISP_PWR_OFF);
+				} else if (displayport->state == DISPLAYPORT_STATE_ON) {
 					displayport_disable(displayport);
 				}
 			}
@@ -4103,7 +4184,7 @@ static int displayport_probe(struct platform_device *pdev)
 	INIT_DELAYED_WORK(&displayport->notifier_register_work,
 			displayport_notifier_register_work);
 	queue_delayed_work(displayport->dp_wq, &displayport->notifier_register_work,
-			msecs_to_jiffies(30000));
+			msecs_to_jiffies(3000));
 #endif
 
 #if defined(CONFIG_EXTCON)
