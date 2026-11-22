@@ -1919,6 +1919,7 @@ void decon_hiber_start(struct decon_device *decon);
 void decon_hiber_finish(struct decon_device *decon);
 int _decon_disable(struct decon_device *decon, enum decon_state state);
 int _decon_enable(struct decon_device *decon, enum decon_state state);
+int decon_update_pwr_state(struct decon_device *decon, u32 mode);
 
 /* IOCTL commands */
 #define S3CFB_SET_VSYNC_INT		_IOW('F', 206, __u32)
